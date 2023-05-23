@@ -1,0 +1,321 @@
+---
+title: "Análisis espacial de la violencia armada en Estados Unidos en 2016"
+author: "Julio Enciso Monfort"
+subtitle: "Datos espaciales y espaciotemporales - BIA \n Universitat de València 2022/2023"
+output: 
+html_document:
+    toc: true
+    toc_depth: 1
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F)
+```
+
+# **1. Carga de librerías**
+
+```{r librerias}
+library(pacman)
+p_load(gamm4,sp,spData,spdep,splitstackshape,urbnmapr,readxl,dplyr,sf,readr,ggplot2,tidyverse, kableExtra)
+```
+
+# **2.Carga de datos y análisis exploratorio incial**
+
+```{r aed}
+# Carga de los datos
+gunviolence <- read_csv("Trabajo/gunviolence.csv")
+
+
+#Selección de variables
+datos <- gunviolence[,c(1,2,3,4,6,7,15,17,20,22)]
+
+#Transformaciones y selección del año de estudio
+datos$year <- substr(datos$date,1,4)
+datos$month <- substr(datos$date,6,7)
+datos_2016 <- datos%>% dplyr::filter(year == "2016")
+
+age <- cSplit(datos_2016,c("participant_age"),sep="||",direction="long",drop=FALSE)
+age$age=gsub(".*::","",age$participant_age)
+age$age=as.numeric(age$age)
+
+age <- age %>% filter(age < 85 & age > 14)
+ggplot(age,aes(x="Age",age))+geom_boxplot(fill="blue")+theme_bw()+labs(x="", y ="", title = "Figura 1: Distribución de la edad de los involucrados",
+                                                                       caption = "Fuente: Elaboración propia",
+                                                                       subtitle = "Distribución de la edad de las personas involucradas en los\nincidentes por violencia armada")
+
+
+gender <- cSplit(datos_2016,c("participant_gender"),sep="||",direction="long",drop=FALSE)
+gender$gender=gsub(".*::","",gender$participant_gender)
+gender$gender=as.factor(gender$gender)
+colnames(gender)[13] <- "genero"
+
+total_muertes_genero <- gender %>%
+  distinct(incident_id, genero, .keep_all = TRUE) %>%
+  group_by(genero) %>%
+  summarise(muertes = sum(n_killed)) %>%
+  ungroup()
+  
+genero <- gender%>%group_by(genero)%>%summarise(total = n())
+genero$muertes <- total_muertes_genero$muertes
+
+
+(genero <- genero%>%kbl(caption = "Fuente: Elabración propia")
+  %>%kable_styling())
+
+
+muertes_mes <- datos_2016 %>% group_by(month) %>% summarise(muertes = sum(n_killed))
+ggplot(muertes_mes, aes(month,muertes))+
+  geom_line(group = 1, color = "red",lwd = 0.75)+
+  theme_bw()+theme(legend.position="bottom")+labs(x="Mes",y="Número de muertes", 
+                                                  title = "Figura 2: Muertes por mes",
+                                                  subtitle = "Distribución del número de muertes por\nincidentes con armas en función del mes\nen el año 2016 en Estados Unidos",
+                                                  caption = "Fuente: Elaboración propia")+
+  ylim(900,1500)
+
+
+
+
+
+
+dia <- datos_2016 %>% group_by(date)%>%summarise(muertes = sum(n_killed))%>%select(date,muertes)
+colnames(dia)[1] <- "fecha"
+head(arrange(dia,desc(muertes)),6)%>%kbl(caption = "Fuente: Elaboración propia")%>%kable_styling(position = "float_left")
+
+
+```
+
+
+# **3.Carga de datos adicionales y sumarización por estados**
+
+```{r}
+# Carga del dataset con la población por estado
+Pop_States <- read_csv("Trabajo/Pop_States.csv")
+# Carga de la geometría
+sum_est <- get_urbn_map(map = "states", sf = TRUE)
+st_crs(sum_est) <- 2163
+datos_est2016 <- left_join(sum_est, datos_2016, by = c("state_name" = "state"))
+
+sum_est <- sum_est%>%arrange(state_name)
+
+
+sum_est <- sum_est%>%left_join(Pop_States, by = c("state_name" = "NAME"))
+colnames(sum_est)[4] <- "Population"
+
+# Sumarización del número de incidentes y víctimas por estado
+sum_est$num_incidentes <- NA
+sum_est$num_incidentes <- datos_est2016%>% group_by(state_name)%>% summarize(num_incidentes = n())%>%select(num_incidentes)
+sum_est$num_incidentes <- head(unlist(sum_est$num_incidentes),51)
+
+
+sum_est$victimas_mort <- NA
+sum_est$victimas_mort <- datos_est2016%>%group_by(state_name)%>%arrange(state_name)%>%summarize(victimas_mort = sum(n_killed))%>%select(victimas_mort)
+sum_est$victimas_mort <- head(unlist(sum_est$victimas_mort),51)
+
+
+sum_est$heridos <- NA
+sum_est$heridos <- datos_est2016%>%group_by(state_name)%>%arrange(state_name)%>%summarize(heridos= sum(n_injured))%>%select(heridos)
+sum_est$heridos <- head(unlist(sum_est$heridos),51)
+
+
+sum_est$victimas_totales <- sum_est$victimas_mort+sum_est$heridos
+
+
+cor(sum_est$victimas_mort, sum_est$Population)
+# Dada la alta correlación, se calculan las tasas por 100.000 habitantes
+
+sum_est$muertos_100k <- sum_est$victimas_mort*(100000/sum_est$Population)
+sum_est$heridos_100k <- sum_est$heridos*(100000/sum_est$Population)
+
+sum_est$incidentes_100k <- sum_est$num_incidentes*(100000/sum_est$Population)
+
+
+sum_est$victimas_100k <- sum_est$victimas_totales*(100000/sum_est$Population)
+
+cuts <- sum_est
+cuts$cuts_muertos100k = cut(cuts$muertos_100k, 10)
+
+ggplot()+
+  geom_sf(data = cuts,aes(fill = as.numeric(cuts_muertos100k)))+
+  scale_fill_gradient(low = "lightyellow", high = "red")+
+  labs(fill = "Tasa", title = "Figura 3: Tasa de muertes por estado",subtitle = "Tasa de muertes por violencia armada cada 100.000 habitantes",
+       caption = "Fuente: Elaboración propia")+
+  theme_classic()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+# carga del cojunto de datos sobre el resultado en las elecciones de 2016
+
+ResultadosElec2016 <- read_excel("Trabajo/ResultadosElec2016.xlsx")
+sum_est <-sum_est%>% left_join(ResultadosElec2016, by = c("state_abbv" = "State"))
+
+sum_est$Result <- as.factor(sum_est$Result)
+cols <- c(R = "#CC3D3D",
+          D = "#1A80C4")
+ggplot()+
+  geom_sf(data = sum_est, aes(geometry = geometry, fill = Result),color="black",size = 0.25)+
+  scale_fill_manual(name="Result", values = cols) +
+  labs(title = " Figura 4: Resultados de las elecciones (2016)",
+       subtitle = "Resultado de las elecciones a la presidencia\nen EE.UU. en el año 2016 por estado",
+       caption = "Fuente: Elaboración propia")+
+  theme_classic()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+# Carga de los datasets sobre la mediana de la renta por hogar y del índice de pobreza
+
+Income_2016 <- read_excel("Trabajo/Income_2016.xlsx", 
+                          col_types = c("text", "numeric"))
+
+Poverty <- read_excel("Trabajo/Poverty.xlsx")
+
+
+sum_est <-sum_est%>% left_join(Income_2016, by = c("state_name" = "State"))
+
+sum_est <-sum_est%>% left_join(Poverty, by = c("state_name" = "State"))
+
+ggplot()+
+  geom_sf(data = sum_est, aes(geometry = geometry, fill = Estimate),color="black",size = 0.25)+
+  labs(title = " Figura 5: Renta mediana por hogar",
+       subtitle = "Estimación de la renta mediana por hogar en 2016",
+       caption = "Fuente: Elaboración propia")+
+  theme_classic()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+# Carga del conjunto de datos con el número de leyes que regulan las armas por estado
+
+GunLaws2016 <- read_excel("Trabajo/GunLaws2016.xlsx", 
+                          col_types = c("text", "numeric"))
+
+sum_est <-sum_est%>% left_join(GunLaws2016, by = c("state_name" = "State"))
+
+sum_est%>%select(c(state_name,Result,GunLaws))%>%arrange(desc(GunLaws))
+
+ggplot(sum_est, aes(Result, GunLaws))+
+  geom_boxplot(fill = c("#1A80C4","#CC3D3D"), lwd = 0.5, width = 0.5)+
+  theme_bw()+
+  labs(x = "", y ="", title = "Figura 6: Número de leyes sobre\ncontrol de armas por partido mayoritario",
+       subtitle = "Distribución del número de leyes estatales\nque regulan el uso de armas por resultado",
+       caption = "Fuente: Elaboración propia")
+
+cor(sum_est$muertos_100k,  sum_est$Estimate)
+cor(sum_est$muertos_100k,  sum_est$PovertyInd)
+cor(sum_est$muertos_100k,  sum_est$GunLaws)
+
+
+```
+
+# **4. Análisis espacial**
+
+```{r AnalisisEspacial}
+# Cálculo de los vecinos y gráfico de dispersión de Moran
+
+(wr <- spdep::poly2nb(sum_est, queen = F))
+xy <- st_centroid(sum_est$geometry)
+ww <- nb2listw(wr, style = "B", zero.policy = T)
+
+(mplot <- moran.plot(sum_est$muertos_100k, listw = nb2listw(wr, style = "B", zero.policy = T),zero.policy = T, col = "blue",
+           ylab = "Valores retardados",xlab = "Tasa de muertes/100.000 hab.", main = "Figura 7: Gráfico de dispersión de Moran",
+           sub = "Fuente: Elaboración propia"))
+
+# Creamos un nuevo objeto para identificar los hotspots
+etiquetas <- left_join(as.data.frame(sum_est), mplot, by = c("muertos_100k" = "x"))
+etiquetas <- etiquetas[,c(1,3,22)]
+
+
+LISA <- function(x) {
+  P = localmoran(sum_est$muertos_100k, listw = ww, zero.policy = T)
+  dif =sum_est$muertos_100k - mean(sum_est$muertos_100k)
+  lag = lag.listw(ww, sum_est$muertos_100k, zero.policy = T) # Calcula el retardo (promedios)
+  clag = dif - mean(lag) # Retardo - Media(Retardo)
+  p = P[,5] # Toma la columna: Pr(z > 0) de P
+  
+  # Se inicializa vector numerico de longitud filas de P
+  quadrant = vector(mode="numeric",length=nrow(P))+5
+  quadrant[dif>0 & clag>0 & p<= 0.06] = 1 # Alto-Alto
+  quadrant[dif<0 & clag<0 & p<= 0.06] = 2 # Bajo-Bajo
+  quadrant[dif<0 & clag>0 & p<= 0.06] = 3 # Bajo-Alto
+  quadrant[dif>0 & clag<0 & p<= 0.06] = 4 # Alto-Bajo
+  
+  # Grafico  
+  brks = c(1,2,3,4,5)
+  colors = c("red", "blue", "lightgreen", "pink", "white")
+  plot(sum_est$geometry, border ="black", col=colors[findInterval(quadrant,brks,all.inside=FALSE)])
+  legend("bottomright", legend = c("High-High", "Low-Low", "Low-High", "High-Low", "Insignificant"),fill = colors, bty="n", cex=0.7,x = 2200000, y = 41,y.intersp=1, x.intersp=1)
+  box()
+  title("Figura 8: LISA Cluster Map", sub = "Fuente: Elaboración propia")
+}
+
+LISA(ww)
+
+# Test de Moran sobre la variable respuesta y primer modelo GAM
+moran.test(sum_est$muertos_100k, list = ww, zero.policy = T)
+
+CAR_model <- gam(formula = muertos_100k ~ Result + s(Estimate) + PovertyInd+ GunLaws,
+                  data=sum_est, REML = T)
+
+summary(CAR_model)
+residuos <- CAR_model$residuals
+moran.test(residuos, listw = ww, zero.policy = T)
+
+# Modelo GAM sin la variable de Resultado
+CAR_model2 <- gam(formula = muertos_100k ~ s(Estimate) + PovertyInd+ GunLaws,
+                 data=sum_est, REML = T)
+summary(CAR_model2) 
+residuos2 <- CAR_model2$residuals
+moran.test(residuos2, listw = ww, zero.policy = T)
+
+
+# Modelo GAM con la componente espacial
+
+adj_list <- st_touches(sum_est, sum_est)
+names(adj_list) <- as.factor(sum_est$state_fips)
+
+CAR_model3 <- gamm4(formula = muertos_100k ~ Result + s(Estimate) + PovertyInd+ GunLaws + s(as.factor(sum_est$state_fips), xt=list(nb=adj_list), bs='mrf'),
+                   data=sum_est, REML = T)
+
+summary(CAR_model3$gam)
+
+# Modelo GAM con la componente espacial sin la variable Resultado
+
+CAR_model4 <- gamm4(formula = muertos_100k ~ s(Estimate) + PovertyInd+ GunLaws + s(as.factor(sum_est$state_fips), xt=list(nb=adj_list), bs='mrf'),
+                    data=sum_est, REML = T)
+
+summary(CAR_model4$gam)
+
+
+# Cálculo y representación de los residuos del modelo final
+
+sum_est$fitted <- predict(CAR_model3$gam)
+sum_est$residuos_gam <- sum_est$muertos_100k - sum_est$fitted 
+plot(sum_est$residuos_gam, main ="Figura 9: Residuos del modelo GAM", sub = "Fuente: Elaboración propia")
+plot(density(sum_est$residuos_gam), main = "Figura 10: Densidad de los residuos del modelo GAM", sub = "Fuente: Elaboración propia")
+moran.test(sum_est$residuos_gam, listw = ww, zero.policy = T)
+
+
+ggplot(sum_est, aes(fill=fitted)) + geom_sf(lwd=0.2) +
+  scale_fill_viridis_c(name='Valor\nPredicho',direction=-1)+
+  theme_classic()+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())+
+  labs(title = "Figura 11: Valores predichos por el modelo GAM", caption = "Fuente: Elaboración propia")+
+  scale_fill_gradient(low ="lightyellow", high = "red",name='Valor\nPredicho')
+
+```
